@@ -231,7 +231,25 @@ console.log('🔥 [WL Bulk] Script loaded!', new Date().toLocaleTimeString());
       const isPressed = playlistButton.getAttribute('aria-pressed') === 'true';
       
       if (isPressed) {
-        log('✅ Video already in playlist, skipping...');
+        log(`✅ Video already in playlist "${playlistName}", skipping add operation`);
+        
+        // Change highlight color to green to indicate "already added"
+        videoRenderer.style.border = '3px solid #00ff00';
+        videoRenderer.style.boxShadow = '0 0 20px rgba(0, 255, 0, 0.6)';
+        
+        // Close the modal
+        const closeButton = document.querySelector('[aria-label="Close"]');
+        if (closeButton) {
+          log('🚪 Closing modal...');
+          closeButton.click();
+          await sleep(400);
+        }
+        
+        // Remove highlight
+        videoRenderer.style.border = originalBorder;
+        videoRenderer.style.boxShadow = originalBoxShadow;
+        
+        return { skipped: true, reason: 'already_in_playlist' };
       } else {
         log(`✓ Clicking button to add to "${playlistName}"...`);
         playlistButton.click();
@@ -250,7 +268,7 @@ console.log('🔥 [WL Bulk] Script loaded!', new Date().toLocaleTimeString());
       videoRenderer.style.border = originalBorder;
       videoRenderer.style.boxShadow = originalBoxShadow;
 
-      return true;
+      return { skipped: false };
 
     } catch (err) {
       error('❌ UI automation failed:', err.message);
@@ -676,6 +694,7 @@ console.log('🔥 [WL Bulk] Script loaded!', new Date().toLocaleTimeString());
       addBtn.style.opacity = '0.5';
 
       let successCount = 0;
+      let skipCount = 0;
       let failCount = 0;
 
       try {
@@ -686,9 +705,15 @@ console.log('🔥 [WL Bulk] Script loaded!', new Date().toLocaleTimeString());
           log(`Processing video ${i + 1}/${renderers.length}`);
           
           try {
-            await addVideoToPlaylistViaUI(renderer, playlistName);
-            successCount++;
-            logMessage(`Added: ${i + 1}/${renderers.length}`);
+            const result = await addVideoToPlaylistViaUI(renderer, playlistName);
+            
+            if (result && result.skipped) {
+              skipCount++;
+              logMessage(`⏭️ Skipped: ${i + 1}/${renderers.length} (already in playlist)`);
+            } else {
+              successCount++;
+              logMessage(`✓ Added: ${i + 1}/${renderers.length}`);
+            }
           } catch (err) {
             failCount++;
             error(`Failed to add video ${i + 1}:`, err.message);
@@ -701,7 +726,8 @@ console.log('🔥 [WL Bulk] Script loaded!', new Date().toLocaleTimeString());
         log('✅ Add phase complete');
 
         // Step 2: Remove from Watch Later if checkbox is checked
-        if (alsoRemove && successCount > 0) {
+        // Remove videos that were successfully added OR already in playlist (skipped)
+        if (alsoRemove && (successCount > 0 || skipCount > 0)) {
           log('🗑️ Step 2: Removing from Watch Later...');
           logMessage('Now removing from Watch Later...');
           
@@ -711,7 +737,7 @@ console.log('🔥 [WL Bulk] Script loaded!', new Date().toLocaleTimeString());
             
             try {
               await removeVideoFromWatchLaterViaUI(renderer);
-              logMessage(`Removed: ${i + 1}/${renderers.length}`);
+              logMessage(`🗑️ Removed: ${i + 1}/${renderers.length}`);
             } catch (err) {
               error(`Failed to remove video ${i + 1}:`, err.message);
               logMessage(`⚠️ Remove failed: ${i + 1}/${renderers.length}`, true);
@@ -723,14 +749,22 @@ console.log('🔥 [WL Bulk] Script loaded!', new Date().toLocaleTimeString());
           log('✅ Remove phase complete');
         }
 
-        const finalMsg = failCount > 0
-          ? `✓ Processed ${renderers.length} videos (${successCount} succeeded, ${failCount} failed)`
-          : alsoRemove
-            ? `✓ Added & removed ${successCount} videos!`
+        // Build detailed summary message
+        let finalMsg = '';
+        if (failCount > 0) {
+          finalMsg = `✓ Processed ${renderers.length}: ${successCount} added, ${skipCount} skipped, ${failCount} failed`;
+        } else if (skipCount > 0) {
+          finalMsg = alsoRemove
+            ? `✓ ${successCount} added, ${skipCount} already in playlist, all removed from WL!`
+            : `✓ ${successCount} added, ${skipCount} already in playlist!`;
+        } else {
+          finalMsg = alsoRemove
+            ? `✓ Added ${successCount} videos & removed from Watch Later!`
             : `✓ Added ${successCount} videos! Selection kept.`;
+        }
         
         toast(finalMsg);
-        logMessage(`✓ Complete: ${successCount} succeeded, ${failCount} failed`);
+        logMessage(`✓ Complete: ${successCount} added, ${skipCount} skipped, ${failCount} failed`);
         
         log('🎉 Operation complete!');
 
