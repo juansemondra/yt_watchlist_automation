@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         Watch Later Bulk Add (UI Automation)
 // @namespace    juanse-watchlater-bulk
-// @version      4.3.0
-// @description  Bulk add Watch Later videos to playlists using YouTube's native UI
+// @version      4.4.0
+// @description  Bulk add Watch Later videos to playlists using YouTube's native UI + Smart Cleanup
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
-console.log('🔥 [WL Bulk] Script loaded! 4.3.0', new Date().toLocaleTimeString());
+console.log('🔥 [WL Bulk] Script loaded! 4.4.0', new Date().toLocaleTimeString());
 
 (() => {
   'use strict';
@@ -39,8 +39,8 @@ console.log('🔥 [WL Bulk] Script loaded! 4.3.0', new Date().toLocaleTimeString
       el.style.cssText = `
         position: fixed; right: 20px; bottom: 80px; z-index: 999999;
         max-width: 400px; padding: 14px 18px; border-radius: 12px;
-        background: ${isErr ? 'rgba(220,38,38,0.95)' : 'rgba(20,20,20,0.95)'};
-        color: #fff;
+        background: ${isErr ? 'rgba(220,38,38,0.95)' : 'rgba(20,20,20,0.95)'}; 
+        color: #fff; 
         font: 14px/1.5 Roboto, Arial, sans-serif;
         box-shadow: 0 12px 40px rgba(0,0,0,0.5);
         border: 1px solid ${isErr ? 'rgba(255,100,100,0.4)' : 'rgba(255,255,255,0.2)'};
@@ -169,6 +169,113 @@ console.log('🔥 [WL Bulk] Script loaded! 4.3.0', new Date().toLocaleTimeString
     return null;
   }
 
+  // ---------- Check if video is in other playlists ----------
+  async function checkIfVideoInOtherPlaylists(videoRenderer) {
+    log(`🔍 Checking if video is in other playlists...`);
+
+    try {
+      videoRenderer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      await sleep(400);
+
+      const originalBorder = videoRenderer.style.border;
+      const originalBoxShadow = videoRenderer.style.boxShadow;
+      videoRenderer.style.border = '3px solid #FFA500';
+      videoRenderer.style.boxShadow = '0 0 20px rgba(255, 165, 0, 0.6)';
+      videoRenderer.style.transition = 'all 0.3s ease';
+
+      const menuButton = videoRenderer.querySelector('button[aria-label*="Action menu"], button[aria-label="More actions"], ytd-menu-renderer button');
+      if (!menuButton) throw new Error('Could not find menu button');
+
+      closeAnyOpenMenu();
+      await sleep(120);
+      robustClick(menuButton);
+      await sleep(500);
+
+      const menuItems = document.querySelectorAll('ytd-menu-service-item-renderer, tp-yt-paper-item');
+      let addToPlaylistItem = null;
+
+      for (const item of menuItems) {
+        const text = item.textContent || '';
+        if (text.includes('Add to playlist') ||
+            text.includes('Save to playlist') ||
+            text.includes('Save to') ||
+            (text.includes('Save') && text.length < 30)) {
+          addToPlaylistItem = item;
+          break;
+        }
+      }
+
+      if (!addToPlaylistItem) {
+        videoRenderer.style.border = originalBorder;
+        videoRenderer.style.boxShadow = originalBoxShadow;
+        closeAnyOpenMenu();
+        throw new Error('Could not find "Save to playlist" option');
+      }
+
+      robustClick(addToPlaylistItem);
+      await sleep(1500);
+
+      let playlistItems = document.querySelectorAll('yt-list-item-view-model');
+      if (playlistItems.length === 0) {
+        await sleep(500);
+        playlistItems = document.querySelectorAll('yt-list-item-view-model');
+      }
+      if (playlistItems.length === 0) {
+        videoRenderer.style.border = originalBorder;
+        videoRenderer.style.boxShadow = originalBoxShadow;
+        closeAnyOpenMenu();
+        throw new Error('Playlist modal did not open');
+      }
+
+      // Count how many playlists this video is in
+      let playlistCount = 0;
+      let playlistNames = [];
+
+      for (const item of playlistItems) {
+        const playlistButton = item.querySelector('button.yt-list-item-view-model__button-or-anchor');
+        if (!playlistButton) continue;
+
+        const isPressed = playlistButton.getAttribute('aria-pressed') === 'true';
+        if (isPressed) {
+          playlistCount++;
+          const titleElement = item.querySelector('.yt-list-item-view-model__title');
+          const playlistName = titleElement?.textContent?.trim() || 'Unknown';
+          playlistNames.push(playlistName);
+        }
+      }
+
+      // Close the modal
+      const closeButton = document.querySelector('[aria-label="Close"]');
+      if (closeButton) {
+        closeButton.click();
+        await sleep(400);
+      }
+
+      videoRenderer.style.border = originalBorder;
+      videoRenderer.style.boxShadow = originalBoxShadow;
+
+      log(`📊 Video is in ${playlistCount} playlist(s): ${playlistNames.join(', ')}`);
+
+      // If count > 1, it means it's in Watch Later + at least one other playlist
+      const isInOtherPlaylists = playlistCount > 1;
+
+      return { 
+        isInOtherPlaylists, 
+        playlistCount, 
+        playlistNames 
+      };
+
+    } catch (err) {
+      error('❌ Check playlists failed:', err.message);
+      try { 
+        videoRenderer.style.border = '';
+        videoRenderer.style.boxShadow = '';
+      } catch {}
+      try { closeAnyOpenMenu(); } catch {}
+      throw err;
+    }
+  }
+
   // ---------- Checkbox injection ----------
   function addCheckbox(renderer) {
     if (renderer.querySelector('.wlBulkCheckbox')) return;
@@ -247,6 +354,15 @@ console.log('🔥 [WL Bulk] Script loaded! 4.3.0', new Date().toLocaleTimeString
   function getSelectedRenderers() {
     const checked = [...document.querySelectorAll('.wlBulkCb:checked')];
     return checked.map(cb => cb.closest('ytd-playlist-video-renderer')).filter(Boolean);
+  }
+
+  function getAllLoadedRenderers() {
+    return [...document.querySelectorAll('ytd-playlist-video-renderer')];
+  }
+
+  function getAllLoadedVideoIds() {
+    const renderers = getAllLoadedRenderers();
+    return renderers.map(r => getVideoIdFromRenderer(r)).filter(Boolean);
   }
 
   function updateSelectedCount() {
@@ -509,11 +625,56 @@ console.log('🔥 [WL Bulk] Script loaded! 4.3.0', new Date().toLocaleTimeString
     checkRow.appendChild(checkLabel);
     panel.appendChild(checkRow);
 
+    // Separator
+    const separator = document.createElement('div');
+    separator.style.cssText = 'height:1px;background:rgba(255,255,255,0.1);margin:12px 0;';
+    panel.appendChild(separator);
+
+    // Smart Cleanup button
+    const smartCleanupBtn = createButton('🧹 Smart Cleanup', false);
+    smartCleanupBtn.id = 'wlBulkSmartCleanupBtn';
+    smartCleanupBtn.style.width = '100%';
+    smartCleanupBtn.style.background = 'rgba(0,200,83,0.15)';
+    smartCleanupBtn.style.borderColor = 'rgba(0,200,83,0.3)';
+    smartCleanupBtn.style.marginBottom = '8px';
+    smartCleanupBtn.onmouseenter = () => {
+      smartCleanupBtn.style.background = 'rgba(0,200,83,0.25)';
+      smartCleanupBtn.style.transform = 'translateY(-1px)';
+      smartCleanupBtn.style.borderColor = 'rgba(0,200,83,0.5)';
+    };
+    smartCleanupBtn.onmouseleave = () => {
+      smartCleanupBtn.style.background = 'rgba(0,200,83,0.15)';
+      smartCleanupBtn.style.transform = 'translateY(0)';
+      smartCleanupBtn.style.borderColor = 'rgba(0,200,83,0.3)';
+    };
+    panel.appendChild(smartCleanupBtn);
+
+    // Smart Cleanup explanation
+    const smartCleanupHelp = document.createElement('div');
+    smartCleanupHelp.style.cssText = 'font-size:11px;opacity:0.7;margin-bottom:12px;line-height:1.4;padding:6px 8px;background:rgba(0,200,83,0.08);border-radius:6px;';
+    smartCleanupHelp.textContent = 'Removes videos from Watch Later only if they exist in other playlists';
+    panel.appendChild(smartCleanupHelp);
+
+    // Another separator
+    const separator2 = document.createElement('div');
+    separator2.style.cssText = 'height:1px;background:rgba(255,255,255,0.1);margin:12px 0;';
+    panel.appendChild(separator2);
+
     const removeOnlyBtn = createButton('🗑️ Only Remove from Watch Later', false);
     removeOnlyBtn.id = 'wlBulkRemoveOnlyBtn';
     removeOnlyBtn.style.width = '100%';
     removeOnlyBtn.style.background = 'rgba(220,38,38,0.15)';
     removeOnlyBtn.style.borderColor = 'rgba(220,38,38,0.3)';
+    removeOnlyBtn.onmouseenter = () => {
+      removeOnlyBtn.style.background = 'rgba(220,38,38,0.25)';
+      removeOnlyBtn.style.transform = 'translateY(-1px)';
+      removeOnlyBtn.style.borderColor = 'rgba(220,38,38,0.5)';
+    };
+    removeOnlyBtn.onmouseleave = () => {
+      removeOnlyBtn.style.background = 'rgba(220,38,38,0.15)';
+      removeOnlyBtn.style.transform = 'translateY(0)';
+      removeOnlyBtn.style.borderColor = 'rgba(220,38,38,0.3)';
+    };
     panel.appendChild(removeOnlyBtn);
 
     const logBox = document.createElement('div');
@@ -549,6 +710,161 @@ console.log('🔥 [WL Bulk] Script loaded! 4.3.0', new Date().toLocaleTimeString
       updateSelectedCount();
       toast('Cleared selection');
       logMessage('Cleared selection');
+    };
+
+    // Smart Cleanup button handler
+    smartCleanupBtn.onclick = async () => {
+      log('🧹 Smart Cleanup clicked!');
+
+      const allVideoIds = getAllLoadedVideoIds();
+      const allRenderers = getAllLoadedRenderers();
+
+      if (allVideoIds.length === 0) {
+        toast('No videos loaded', true);
+        logMessage('No videos loaded', true);
+        return;
+      }
+
+      const confirmMsg = `Smart Cleanup will:\n\n1. Check all ${allVideoIds.length} loaded video(s)\n2. Remove from Watch Later ONLY if the video exists in other playlists\n3. Keep videos that are ONLY in Watch Later\n\nThis may take a while. Continue?`;
+
+      if (!confirm(confirmMsg)) {
+        logMessage('Smart Cleanup cancelled by user');
+        return;
+      }
+
+      toast(`Smart Cleanup: Checking ${allVideoIds.length} videos...`);
+      logMessage(`🧹 Smart Cleanup started: ${allVideoIds.length} videos`);
+
+      smartCleanupBtn.disabled = true;
+      smartCleanupBtn.style.opacity = '0.5';
+
+      let checkedCount = 0;
+      let toRemoveCount = 0;
+      let keptCount = 0;
+      let errorCount = 0;
+
+      const videosToRemove = [];
+
+      try {
+        // Phase 1: Check each video
+        logMessage('Phase 1: Checking which videos are in other playlists...');
+        
+        for (let i = 0; i < allRenderers.length; i++) {
+          const renderer = allRenderers[i];
+          const videoId = allVideoIds[i];
+
+          log(`Checking video ${i + 1}/${allRenderers.length} (${videoId})`);
+          logMessage(`🔍 Checking: ${i + 1}/${allRenderers.length}`);
+
+          try {
+            const result = await checkIfVideoInOtherPlaylists(renderer);
+            checkedCount++;
+
+            if (result.isInOtherPlaylists) {
+              toRemoveCount++;
+              videosToRemove.push({ videoId, renderer });
+              logMessage(`✓ Will remove ${i + 1}/${allRenderers.length} (in ${result.playlistCount} playlists)`);
+            } else {
+              keptCount++;
+              logMessage(`○ Will keep ${i + 1}/${allRenderers.length} (only in Watch Later)`);
+            }
+
+          } catch (err) {
+            errorCount++;
+            error(`Failed to check video ${i + 1}:`, err.message);
+            logMessage(`⚠️ Check failed: ${i + 1}/${allRenderers.length}`, true);
+          }
+
+          // Pause between checks
+          await sleep(1200);
+
+          // Batch pause every 25 videos
+          if ((i + 1) % 25 === 0 && (i + 1) < allRenderers.length) {
+            log(`⏸️ Batch pause after ${i + 1} checks...`);
+            logMessage(`⏸️ Batch pause (checked ${i + 1}/${allRenderers.length})...`);
+            await sleep(2500);
+          }
+        }
+
+        logMessage(`Check complete: ${toRemoveCount} to remove, ${keptCount} to keep, ${errorCount} errors`);
+
+        // Phase 2: Remove videos that are in other playlists
+        if (videosToRemove.length === 0) {
+          toast('✓ No videos to remove - all are only in Watch Later!');
+          logMessage('✓ No videos to remove');
+        } else {
+          const confirmRemove = confirm(`Found ${videosToRemove.length} video(s) that exist in other playlists.\n\nRemove them from Watch Later now?`);
+
+          if (!confirmRemove) {
+            logMessage('Removal cancelled by user');
+            toast('Smart Cleanup cancelled');
+          } else {
+            logMessage('Phase 2: Removing videos from Watch Later...');
+
+            let removedCount = 0;
+
+            for (let i = 0; i < videosToRemove.length; i++) {
+              const { videoId, renderer } = videosToRemove[i];
+
+              log(`Removing video ${i + 1}/${videosToRemove.length} (${videoId})`);
+
+              try {
+                let removed = false;
+
+                for (let attempt = 1; attempt <= 4; attempt++) {
+                  const freshRenderer = await getFreshRenderer(videoId, renderer);
+                  if (!freshRenderer) break;
+
+                  closeAnyOpenMenu();
+                  await sleep(150);
+
+                  try { await removeVideoFromWatchLaterViaUI(freshRenderer, videoId); } catch {}
+
+                  await sleep(600 + attempt * 350);
+
+                  if (!isVideoStillInWatchLater(videoId)) {
+                    removed = true;
+                    break;
+                  }
+
+                  const backoff = 900 + attempt * 700;
+                  log(`🔁 Removal verification failed for ${videoId} (attempt ${attempt}/4). Backoff ${backoff}ms...`);
+                  await sleep(backoff);
+                }
+
+                if (!removed) throw new Error('Verification failed');
+
+                removedCount++;
+                logMessage(`🗑️ Removed: ${i + 1}/${videosToRemove.length}`);
+
+              } catch (err) {
+                error(`Failed to remove video ${i + 1}:`, err.message);
+                logMessage(`⚠️ Remove failed: ${i + 1}/${videosToRemove.length}`, true);
+              }
+
+              await sleep(900);
+
+              // Batch pause
+              if ((i + 1) % 25 === 0 && (i + 1) < videosToRemove.length) {
+                log(`⏸️ Batch pause after ${i + 1} removals...`);
+                logMessage(`⏸️ Batch pause (removed ${i + 1}/${videosToRemove.length})...`);
+                await sleep(2500);
+              }
+            }
+
+            toast(`✓ Smart Cleanup complete! Removed ${removedCount}/${videosToRemove.length} videos`);
+            logMessage(`✓ Complete: Removed ${removedCount}, Kept ${keptCount}`);
+          }
+        }
+
+      } catch (err) {
+        error('Smart Cleanup failed:', err);
+        toast(`✗ Error: ${err.message}`, true);
+        logMessage(`✗ Error: ${err.message}`, true);
+      } finally {
+        smartCleanupBtn.disabled = false;
+        smartCleanupBtn.style.opacity = '1';
+      }
     };
 
     addBtn.onclick = async () => {
@@ -672,7 +988,6 @@ console.log('🔥 [WL Bulk] Script loaded! 4.3.0', new Date().toLocaleTimeString
         logMessage(finalMsg);
         log('🎉 Operation complete! (AUTO_RELOAD_AFTER_RUN disabled)');
 
-        // ✅ NO RELOAD: keep console alive for debugging
         if (alsoRemove) {
           setTimeout(() => {
             const cbs = document.querySelectorAll('.wlBulkCb:checked');
